@@ -52,7 +52,7 @@ class Toolbar(BoxLayout):
 class BrainHUD(Label):
     """Небольшая панель состояния мозга/гормонов Viktim -- отладочный вид, как в редакторах Adobe."""
     def __init__(self, **kwargs):
-        super().__init__(size_hint=(1, None), height=28, halign="left", valign="middle", **kwargs)
+        super().__init__(size_hint=(1, None), height=56, halign="left", valign="middle", font_size=13, **kwargs)
         self.bind(size=self._update_text_size)
 
     def _update_text_size(self, *a):
@@ -90,7 +90,7 @@ class VictimRenderer:
 class AdobeBeckerApp(App):
     def build(self):
         self.title = "Adobe Becker Style Studio -- Viktim"
-        root = BoxLayout(orientation="vertical")
+        root = BoxLayout(orientation="vertical", padding=[0, 24, 0, 0])
 
         self.workspace = Workspace(size_hint=(1, 1))
         self.hud = BrainHUD()

@@ -1,43 +1,39 @@
 # -*- coding: utf-8 -*-
 """
 neuron.py
-Adaptive Exponential Integrate-and-Fire (AdEx) neuron.
-Brette & Gerstner (2005) model. Векторизовано через numpy для 150 нейронов.
+AdEx-нейрон (Brette & Gerstner, 2005) + синаптическая матрица с УРОВНЕМ 1
+пластичности (кратковременная, Tsodyks-Markram: facilitation/depression)
+встроенным прямо в шаг интегрирования, т.к. она работает на масштабе мс
+одновременно с самим спайком.
 
-dV/dt = ( -gL*(V-EL) + gL*DeltaT*exp((V-VT)/DeltaT) + I_syn + I_ext - w ) / C
-dw/dt = ( a*(V-EL) - w ) / tau_w
-spike:  V > Vpeak  ->  V = Vr ; w += b
+Остальные уровни пластичности (2 - STDP/Hebb, 3 - метапластичность BCM,
+4 - гомеостатическое масштабирование, 5 - нейромодуляторный гейтинг,
+6 - структурная пластичность, 7 - системная/циркадная консолидация)
+реализованы в plasticity.py и оркестрируются из brain.py.
 """
 
 import numpy as np
 
 
 class AdExPopulation:
-    """
-    Векторизованная популяция AdEx-нейронов (используется для всех 150 клеток мозга).
-    Каждый нейрон может иметь свой набор параметров (RS / FS / бурстинг), заданный
-    массивами -- это позволяет иметь как возбуждающие "regular spiking", так и
-    тормозные "fast spiking" клетки в одной популяции.
-    """
+    """Векторизованная популяция AdEx-нейронов с трассировкой активности для BCM/гомеостаза."""
 
     def __init__(self, n, excitatory_mask, dt_ms=0.5):
         self.n = n
-        self.dt = dt_ms  # мс
-        self.excitatory = excitatory_mask.astype(bool)  # True = глутамат, False = ГАМК
+        self.dt = dt_ms
+        self.excitatory = excitatory_mask.astype(bool)
 
-        # Параметры по умолчанию (регулярно-спайкующие возбуждающие клетки, pF/nS/mV/ms)
-        self.C = np.full(n, 200.0)       # pF
-        self.gL = np.full(n, 10.0)       # nS
-        self.EL = np.full(n, -70.0)      # mV
-        self.VT = np.full(n, -50.0)      # mV
-        self.DeltaT = np.full(n, 2.0)    # mV
-        self.a = np.full(n, 2.0)         # nS
-        self.tau_w = np.full(n, 30.0)    # ms
-        self.b = np.full(n, 0.02)        # nA -> используем nA=1000 pA согласовано с I в nA*? см. ниже
-        self.Vr = np.full(n, -58.0)      # mV
-        self.Vpeak = np.full(n, 0.0)     # mV
+        self.C = np.full(n, 200.0)
+        self.gL = np.full(n, 10.0)
+        self.EL = np.full(n, -70.0)
+        self.VT = np.full(n, -50.0)
+        self.DeltaT = np.full(n, 2.0)
+        self.a = np.full(n, 2.0)
+        self.tau_w = np.full(n, 30.0)
+        self.b = np.full(n, 0.02)
+        self.Vr = np.full(n, -58.0)
+        self.Vpeak = np.full(n, 0.0)
 
-        # Тормозные (ГАМК) нейроны -> fast-spiking: меньше адаптации, более узкий рефрактер
         inhib = ~self.excitatory
         self.a[inhib] = 0.5
         self.b[inhib] = 0.005
@@ -48,17 +44,19 @@ class AdExPopulation:
         self.w = np.zeros(n)
         self.spiked = np.zeros(n, dtype=bool)
 
-        # рефрактерный период (мс) после спайка, чтобы не залипать в экспоненте
         self.refractory_ms = 2.0
         self.refractory_timer = np.zeros(n)
 
+        # --- для уровня 2/3 пластичности: экспоненциальные следы спайков ---
+        self.tau_trace = 20.0  # мс
+        self.spike_trace = np.zeros(n)          # быстрый след (Hebb/STDP)
+
+        # --- для уровня 3 (метапластичность BCM) и уровня 4 (гомеостаз) ---
+        self.tau_avg_rate = 5000.0               # мс, медленное скользящее среднее частоты
+        self.avg_rate = np.full(n, 0.01)          # доля спайков/шаг, скользящее среднее
+        self.target_rate = np.full(n, 0.02)       # гомеостатическая целевая активность
+
     def step(self, I_syn, I_ext=0.0, gain=1.0, noise_std=0.0):
-        """
-        Один шаг интегрирования (self.dt мс).
-        I_syn, I_ext -- в nA (наноамперы), одна на нейрон (I_syn) или скаляр/массив (I_ext).
-        gain -- множитель чувствительности (модулируется норадреналином/кортизолом).
-        Возвращает булев массив self.spiked.
-        """
         active = self.refractory_timer <= 0
         I_total = (I_syn + I_ext) * gain
         if noise_std > 0:
@@ -80,37 +78,73 @@ class AdExPopulation:
         self.refractory_timer = np.where(
             self.spiked, self.refractory_ms, np.maximum(self.refractory_timer - self.dt, 0)
         )
+
+        # обновление следов активности (используются уровнями пластичности 2,3,4)
+        self.spike_trace *= np.exp(-self.dt / self.tau_trace)
+        self.spike_trace += self.spiked.astype(float)
+        self.avg_rate += (self.dt / self.tau_avg_rate) * (self.spiked.astype(float) - self.avg_rate)
+
         return self.spiked
 
 
 class SynapseMatrix:
     """
-    Разреженная матрица синапсов между нейронами одной популяции.
-    Хранится в COO-формате (pre, post, weight, sign) для 15000 связей.
-    Ток от каждого пресинаптического спайка складывается в экспоненциально
-    затухающий синаптический ток на постсинаптическом нейроне.
+    Разреженная COO-матрица синапсов.
+    Содержит УРОВЕНЬ 1 пластичности (кратковременная, Tsodyks-Markram) прямо
+    в step(): каждый синапс имеет ресурс x (доступный нейротрансмиттер) и
+    коэффициент использования u (вероятность высвобождения), которые
+    динамически меняются при каждом пресинаптическом спайке -- это даёт
+    кратковременную депрессию/фасилитацию независимо от долговременного веса w.
+
+    Долговременный вес w изменяется отдельно, через apply_plasticity()
+    (уровни 2/3/5, см. plasticity.py), и структурно перестраивается через
+    структурную пластичность (уровень 6, plasticity.py).
     """
 
-    def __init__(self, n, pre_idx, post_idx, weights, is_excitatory, tau_syn_ms=5.0):
-        self.n = n
+    def __init__(self, n_post, pre_idx, post_idx, weights, is_excitatory,
+                 tau_syn_ms=5.0, region_of=None):
+        self.n_post = n_post
         self.pre = pre_idx
         self.post = post_idx
         self.w = weights.astype(np.float64)
         self.sign = np.where(is_excitatory, 1.0, -1.0)
+        self.is_excitatory = np.asarray(is_excitatory, dtype=bool)
         self.tau_syn = tau_syn_ms
-        self.I = np.zeros(n)  # синаптический ток на каждый постсинаптический нейрон
+        self.I = np.zeros(n_post)
+        self.active = np.ones(len(pre_idx), dtype=bool)  # для структурной пластичности (ур.6)
+
+        # region_of: массив region_id для каждого нейрона популяции (используется
+        # структурной пластичностью, чтобы восстанавливать связи в биологически
+        # правдоподобных направлениях, а не абсолютно случайно)
+        self.region_of = region_of
+
+        n_syn = len(pre_idx)
+        # --- Tsodyks-Markram параметры кратковременной пластичности ---
+        # возбуждающие синапсы -- преимущественно депрессирующие (типично для E->E коры),
+        # тормозные -- слабо фасилитирующие (типично для части интернейронов)
+        self.U0 = np.where(self.is_excitatory, 0.25, 0.15)
+        self.tau_rec = np.where(self.is_excitatory, 300.0, 100.0)   # мс, восстановление ресурса
+        self.tau_facil = np.where(self.is_excitatory, 50.0, 400.0)  # мс, фасилитация
+        self.u = self.U0.copy()
+        self.x = np.ones(n_syn)
+
+        # накопитель "дневного" использования синапса -- нужен уровню 7 (консолидация сна)
+        self.daily_usage = np.zeros(n_syn)
 
     def step(self, presyn_spikes, dt, neuromod_gain=1.0):
-        # экспоненциальный распад тока
-        self.I *= np.exp(-dt / self.tau_syn)
-        fired = presyn_spikes[self.pre]
-        if fired.any():
-            contrib = self.w[fired] * self.sign[fired] * neuromod_gain
-            np.add.at(self.I, self.post[fired], contrib)
-        return self.I
+        # пассивное восстановление ресурсов (уровень 1, кратковременная пластичность)
+        self.x += dt * (1.0 - self.x) / self.tau_rec
+        self.u += dt * (self.U0 - self.u) / self.tau_facil
 
-    def apply_stdp(self, pre_spike_trace, post_spike_trace, lr=0.0005, w_max=5.0):
-        """Лёгкий STDP: усиление при корреляции pre->post, ослабление в обратную сторону."""
-        dw = lr * (pre_spike_trace[self.pre] * post_spike_trace[self.post]
-                    - 0.5 * post_spike_trace[self.pre] * pre_spike_trace[self.post])
-        self.w = np.clip(self.w + dw, 0.0, w_max)
+        self.I *= np.exp(-dt / self.tau_syn)
+
+        fired = presyn_spikes[self.pre] & self.active
+        if fired.any():
+            release = self.u[fired] * self.x[fired]           # эффективная доля высвобождения
+            self.x[fired] -= release                           # истощение ресурса (депрессия)
+            self.u[fired] += self.U0[fired] * (1.0 - self.u[fired])  # фасилитация от Ca2+ притока
+
+            contrib = self.w[fired] * self.sign[fired] * neuromod_gain * release
+            np.add.at(self.I, self.post[fired], contrib)
+            np.add.at(self.daily_usage, np.nonzero(fired)[0], np.abs(contrib))
+        return self.I

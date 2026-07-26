@@ -9,11 +9,11 @@ requirements = python3,kivy,numpy==v1.26.4
 orientation = landscape
 fullscreen = 0
 
+[buildozer]
+log_level = 2
+
+[app:android]
 android.permissions = INTERNET
 android.api = 34
 android.minapi = 24
-android.build_tools_version = 35.0.0
 android.archs = arm64-v8a, armeabi-v7a
-
-[buildozer]
-log_level = 2

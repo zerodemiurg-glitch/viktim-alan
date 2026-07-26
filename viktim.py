@@ -17,38 +17,37 @@ viktim.py
 """
 
 import math
+import json
 import numpy as np
-from brain import Brain
+from brain import Brain, POSITION_SIGNAL_LEN
 
 VISION_RANGE = 400.0
 
 # --- Соматотопическая карта тела в МОТОРНОЙ коре (контралатерально, как в реальном
-# мозге: левое полушарие управляет ПРАВОЙ стороной тела и наоборот). Индексы --
-# позиции в конкатенированном 40-мерном motor-векторе (motor[0:20] = выход левого
-# полушария, motor[20:40] = выход правого). Голова -- билатеральная структура,
-# получает вклад от обоих полушарий. Используется только для фантомной боли
-# (см. Viktim.update) -- при потере части тела эти же нейроны продолжают получать
-# "приказ двигаться", но никогда не получают сенсорного подтверждения.
+# мозге). Индексы -- позиции в конкатенированном 100-мерном motor-векторе
+# (motor[0:50] = выход левого полушария MOTOR-региона, motor[50:100] = правого).
+# Общие "локомоторные" пулы (general_a/general_b) не привязаны к конкретной
+# части тела -- они дают общий сигнал скорости/поворота (см. Viktim.update).
 BODY_PART_MOTOR_IDX = {
-    "head":  [0, 1, 20, 21],
-    "arm_r": [2, 3, 4, 5],      # контралатерально -- левое полушарие (motor[0:20])
-    "leg_r": [6, 7, 8, 9],
-    "arm_l": [22, 23, 24, 25],  # контралатерально -- правое полушарие (motor[20:40])
-    "leg_l": [26, 27, 28, 29],
+    "head":  [0, 1, 2, 3, 50, 51, 52, 53],
+    "arm_r": [4, 5, 6, 7, 8, 9, 10, 11],       # контралатерально -- левое полушарие
+    "leg_r": [12, 13, 14, 15, 16, 17, 18, 19],
+    "arm_l": [54, 55, 56, 57, 58, 59, 60, 61],  # контралатерально -- правое полушарие
+    "leg_l": [62, 63, 64, 65, 66, 67, 68, 69],
 }
-# те же части тела, но как ЛОКАЛЬНЫЕ индексы внутри MOTOR-региона (80-99) одного
-# полушария -- нужно для коркового ремаппинга (plasticity.apply_cortical_remapping,
-# вызывается из brain.py, который работает с локальной нумерацией нейронов).
-_MOTOR_START = 80
+# те же части тела, но как ЛОКАЛЬНЫЕ индексы внутри MOTOR-региона (200-249) одного
+# полушария -- нужно для коркового ремаппинга (plasticity.apply_cortical_remapping).
+_MOTOR_START = 200
 BODY_PART_LOCAL_IDX = {
-    "head_left":  [_MOTOR_START + 0, _MOTOR_START + 1],
-    "head_right": [_MOTOR_START + 0, _MOTOR_START + 1],
-    "arm_r": [_MOTOR_START + 2, _MOTOR_START + 3, _MOTOR_START + 4, _MOTOR_START + 5],   # локально в LEFT
-    "leg_r": [_MOTOR_START + 6, _MOTOR_START + 7, _MOTOR_START + 8, _MOTOR_START + 9],   # локально в LEFT
-    "arm_l": [_MOTOR_START + 2, _MOTOR_START + 3, _MOTOR_START + 4, _MOTOR_START + 5],   # локально в RIGHT
-    "leg_l": [_MOTOR_START + 6, _MOTOR_START + 7, _MOTOR_START + 8, _MOTOR_START + 9],   # локально в RIGHT
+    "head_left":  [_MOTOR_START + i for i in range(4)],
+    "head_right": [_MOTOR_START + i for i in range(4)],
+    "arm_r": [_MOTOR_START + i for i in range(4, 12)],   # локально в LEFT
+    "leg_r": [_MOTOR_START + i for i in range(12, 20)],  # локально в LEFT
+    "arm_l": [_MOTOR_START + i for i in range(4, 12)],   # локально в RIGHT
+    "leg_l": [_MOTOR_START + i for i in range(12, 20)],  # локально в RIGHT
 }
 PHANTOM_WEIGHT = 0.5  # сила фантомного сигнала до какого-либо ремаппинга
+TUNING_UNITS = POSITION_SIGNAL_LEN // 4  # 25 предпочитаемых направлений на each канал/полушарие
 
 
 class Bone:
@@ -106,6 +105,28 @@ class Viktim:
             self.limbs[part] = False
             self._remap_count_at_injury[part] = self.brain.remap_count
 
+    # ---------- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ: сохранение/загрузка всего Viktim между сессиями ----------
+    def to_dict(self):
+        return {
+            "x": self.x, "y": self.y, "facing": self.facing,
+            "limbs": self.limbs, "remap_count_at_injury": self._remap_count_at_injury,
+            "brain": self.brain.to_dict(),
+        }
+
+    def load_dict(self, d):
+        self.x, self.y, self.facing = d["x"], d["y"], d["facing"]
+        self.limbs = d["limbs"]
+        self._remap_count_at_injury = d.get("remap_count_at_injury", {})
+        self.brain.load_dict(d["brain"])
+
+    def save_state(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f)
+
+    def load_state(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            self.load_dict(json.load(f))
+
     # ---------- Восприятие мира: только сырые физические величины ----------
     def perceive(self, objects, cursor_pos):
         """
@@ -129,17 +150,17 @@ class Viktim:
             if score > best_score:
                 best_score, best_obj = score, o
 
-        position_signal = np.zeros(40)
+        position_signal = np.zeros(POSITION_SIGNAL_LEN)
         if best_obj is not None:
             dx, dy = best_obj.x - self.x, best_obj.y - self.y
             dist = math.hypot(dx, dy) + 1e-6
             angle = math.atan2(dy, dx)
             for hemi in range(2):
-                base = hemi * 20
-                for i in range(10):
-                    pref = -math.pi + i * (2 * math.pi / 10)
+                base = hemi * (POSITION_SIGNAL_LEN // 2)
+                for i in range(TUNING_UNITS):
+                    pref = -math.pi + i * (2 * math.pi / TUNING_UNITS)
                     diff = abs((angle - pref + math.pi) % (2 * math.pi) - math.pi)
-                    tuning = math.exp(-(diff ** 2) / (2 * (0.6 ** 2)))
+                    tuning = math.exp(-(diff ** 2) / (2 * (0.5 ** 2)))
                     position_signal[base + i] = tuning * max(0.0, 1.0 - dist / VISION_RANGE)
 
         if cursor_pos is not None:
@@ -148,11 +169,11 @@ class Viktim:
             dist = math.hypot(dx, dy) + 1e-6
             angle = math.atan2(dy, dx)
             for hemi in range(2):
-                base = hemi * 20 + 10
-                for i in range(10):
-                    pref = -math.pi + i * (2 * math.pi / 10)
+                base = hemi * (POSITION_SIGNAL_LEN // 2) + TUNING_UNITS
+                for i in range(TUNING_UNITS):
+                    pref = -math.pi + i * (2 * math.pi / TUNING_UNITS)
                     diff = abs((angle - pref + math.pi) % (2 * math.pi) - math.pi)
-                    tuning = math.exp(-(diff ** 2) / (2 * (0.6 ** 2)))
+                    tuning = math.exp(-(diff ** 2) / (2 * (0.5 ** 2)))
                     position_signal[base + i] = tuning * max(0.0, 1.0 - dist / VISION_RANGE)
 
         looming = best_score * 0.35  # мягкая врождённая настороженность к быстро приближающимся телам
@@ -207,6 +228,15 @@ class Viktim:
         self._last_motor = out["motor"]
         self._t += dt_ms
 
+        # --- долговременная память: значимые события (сильная боль/облегчение)
+        # кодируются в гиппокампальный энграмм (см. memory.py), который позже
+        # будет реигран во сне для системной консолидации в кору ---
+        self.brain.longterm_memory.maybe_encode(
+            pos_signal, self._physical_pain, self._physical_relief,
+            context={"night": out["is_night"], "missing_limbs": [p for p, ok in self.limbs.items() if not ok]},
+            age_hours=self.brain.clock.age_hours_total,
+        )
+
         physically_blocked = self.grabbed or self.freeze_timer > 0 or self.entangled_by is not None
         if self.freeze_timer > 0:
             self.freeze_timer = max(0.0, self.freeze_timer - dt_ms)
@@ -217,61 +247,118 @@ class Viktim:
             return out
 
         motor = out["motor"]
-        loco = motor[0:7].mean()
-        turn = motor[14:20].mean() - motor[34:40].mean()
+        # "общие" (не привязанные к конкретной части тела) пулы моторной коры,
+        # дающие итоговый сигнал скорости/направления -- см. компоновку в brain.py
+        loco = np.concatenate([motor[20:35], motor[70:85]]).mean()
+        raw_turn = motor[35:50].mean() - motor[85:100].mean()
+
+        # сглаживаем "куда поворачивать" экспоненциальным средним -- иначе шумные
+        # спайки моторной коры дают рысканье лицом влево-вправо каждый кадр,
+        # чего в оригинальной анимации никогда не было (Victim двигался чётко и уверенно)
+        self._turn_ema = 0.85 * getattr(self, "_turn_ema", 0.0) + 0.15 * raw_turn
+        turn = self._turn_ema
 
         nm = out["neuromodulators"]
         cortisol, dopamine = nm["cortisol"], nm["dopamine"]
         sleep_pressure = out["sleep_pressure"]
         is_night = out["is_night"]
 
-        # состояние -- ТОЛЬКО ярлык постфактум для HUD/анимации, не участвует в принятии решений
+        # ---- решение о состоянии (постфактум-ярлык) + гистерезис длительности ----
         if is_night and sleep_pressure > 0.5 and threat_level < 0.1:
-            self.state = "sleep"
-            direction, speed = 0, 0
+            candidate = "sleep"
         elif threat_level > 0.2 or cortisol > 0.45 or nm["norepinephrine"] > 0.45:
-            # немедленный рефлекс бегства/отдёргивания -- реагирует на СЕЙЧАС ощущаемую
-            # боль/опасность (быстро, через threat_level и NE), а не ждёт, пока накопится
-            # медленный кортизол -- тот отражает уже закрепившуюся тревожность ПОСЛЕ события,
-            # а не то, что должно триггерить сам рефлекс бегства
-            self.state = "flee"
+            candidate = "flee"  # рефлекс -- всегда может прервать любое другое состояние немедленно
+        elif dopamine > 0.55 and loco > 0.03:
+            candidate = "approach"
+        elif loco > 0.05:
+            candidate = "walk"
+        else:
+            candidate = "idle"
+
+        state_since = getattr(self, "_state_since", 0.0)
+        min_dwell = {"sleep": 800.0, "approach": 250.0, "walk": 200.0, "idle": 200.0}.get(self.state, 0.0)
+        can_switch = candidate == "flee" or (self._t - state_since) >= min_dwell
+        if candidate != self.state and can_switch:
+            self.state = candidate
+            self._state_since = self._t
+
+        if self.state == "sleep":
+            direction, speed = 0, 0
+        elif self.state == "flee":
             direction = -1 if turn >= 0 else 1
             speed = 60 + 120 * max(cortisol, threat_level)
-        elif dopamine > 0.55 and loco > 0.03:
-            self.state = "approach"
+        elif self.state == "approach":
             direction = 1 if turn >= 0 else -1
             speed = 40 + 80 * dopamine
-        elif loco > 0.05:
-            self.state = "walk"
+        elif self.state == "walk":
             direction = 1 if turn >= 0 else -1
             speed = 30 + 100 * loco
         else:
-            self.state = "idle"
             direction, speed = 0, 0
 
-        self.facing = direction if direction != 0 else self.facing
+        # смена направления взгляда/движения -- тоже с небольшим порогом нечувствительности,
+        # чтобы не дрожать на месте, если turn колеблется вблизи нуля
+        if direction != 0 and (self.facing == 0 or abs(turn) > 0.02 or direction == self.facing):
+            self.facing = direction
         self.vx = direction * speed
         self.x += self.vx * (dt_ms / 1000.0)
 
+        self._animate_body(dt_ms)
+        return out
+
+    def _animate_body(self, dt_ms):
+        """
+        Кинематика тела -- полностью ОТДЕЛЕНА от гормонально-решающей логики выше.
+        Ходьба доступна Viktim с первого мгновения существования (в оригинале он
+        сразу же ходит, оглядывается и уворачивается -- это не то, чему он учится).
+        Фаза шага привязана к РЕАЛЬНО пройденному расстоянию (а не к сырой частоте
+        спайков), поэтому ноги всегда синхронны с фактической скоростью движения --
+        как в настоящей походке, а не рассинхронизированное скольжение.
+        """
         if self.state == "sleep":
             breathing = math.sin(self._t * 0.003) * 0.05
             self.torso.angle = -math.radians(10) + breathing
-            for b in (self.leg_l_upper, self.leg_r_upper, self.leg_l_lower, self.leg_r_lower,
-                      self.arm_l_upper, self.arm_r_upper):
-                b.angle *= 0.9
-        else:
-            self.torso.angle = -math.pi / 2
-            phase = self._t * (0.002 + 0.02 * loco)
-            swing = math.sin(phase) * (0.3 + 0.6 * loco)
-            self.leg_l_upper.angle = math.radians(10) + swing
-            self.leg_r_upper.angle = math.radians(-10) - swing
-            self.leg_l_lower.angle = math.radians(5) + max(0, swing) * 0.5
-            self.leg_r_lower.angle = math.radians(-5) - min(0, swing) * 0.5
-            arms = motor[7:14]
-            self.arm_l_upper.angle = math.radians(20) + arms[0] * 1.5 - swing * 0.5
-            self.arm_r_upper.angle = math.radians(-20) - arms[1] * 1.5 + swing * 0.5
+            target_angles = {
+                "leg_l_upper": 0.0, "leg_r_upper": 0.0, "leg_l_lower": 0.0, "leg_r_lower": 0.0,
+                "arm_l_upper": 0.0, "arm_r_upper": 0.0,
+            }
+            self._relax_towards(target_angles, dt_ms, rate=4.0)
+            return
 
-        return out
+        self.torso.angle = -math.pi / 2
+        speed_px_s = abs(self.vx)
+        STRIDE_RATE = 0.045  # радиан фазы шага на пиксель пройденного пути
+        self._stride_phase = getattr(self, "_stride_phase", 0.0)
+        self._stride_phase += speed_px_s * (dt_ms / 1000.0) * STRIDE_RATE
+
+        if speed_px_s > 1.0:
+            amplitude = min(0.9, 0.35 + speed_px_s / 220.0)  # чуть шире шаг на бегу, как в оригинале
+            swing = math.sin(self._stride_phase) * amplitude
+            lift = max(0.0, math.sin(self._stride_phase)) * 0.35  # лёгкое поджатие колена на взмахе
+            target_angles = {
+                "leg_l_upper": math.radians(10) + swing,
+                "leg_r_upper": math.radians(-10) - swing,
+                "leg_l_lower": math.radians(5) + max(0, swing) * 0.6 + lift,
+                "leg_r_lower": math.radians(-5) - min(0, swing) * 0.6 - lift,
+                "arm_l_upper": math.radians(20) - swing * 0.8,   # руки качаются ПРОТИВОФАЗНО ногам
+                "arm_r_upper": math.radians(-20) + swing * 0.8,
+            }
+            self._relax_towards(target_angles, dt_ms, rate=14.0)  # быстро "догоняет" нужную фазу бега
+        else:
+            # стоит на месте -- плавно, а не рывком, возвращается в нейтральную стойку
+            target_angles = {
+                "leg_l_upper": math.radians(10), "leg_r_upper": math.radians(-10),
+                "leg_l_lower": math.radians(5), "leg_r_lower": math.radians(-5),
+                "arm_l_upper": math.radians(20), "arm_r_upper": math.radians(-20),
+            }
+            self._relax_towards(target_angles, dt_ms, rate=6.0)
+
+    def _relax_towards(self, target_angles, dt_ms, rate):
+        """Экспоненциальная интерполяция углов костей к цели -- убирает рывки/дрожание."""
+        k = 1.0 - math.exp(-rate * dt_ms / 1000.0)
+        for name, target in target_angles.items():
+            bone = getattr(self, name)
+            bone.angle += (target - bone.angle) * k
 
     # ---------- Геометрия скелета для отрисовки ----------
     def skeleton_points(self):

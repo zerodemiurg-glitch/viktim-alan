@@ -114,8 +114,10 @@ class ObjectToolbar(BoxLayout):
         for label, cb in (("⎌Undo", lambda i: app.workspace.undo()),
                           ("⎌Redo", lambda i: app.workspace.redo()),
                           ("Очистить", lambda i: app.workspace.clear()),
-                          ("💾", lambda i: app.save_scene()),
-                          ("📂", lambda i: app.load_scene())):
+                          ("💾Сцена", lambda i: app.save_scene()),
+                          ("📂Сцена", lambda i: app.load_scene()),
+                          ("🧠💾", lambda i: app.save_brain()),
+                          ("🧠📂", lambda i: app.load_brain())):
             b = Button(text=label, font_size=9)
             b.bind(on_release=cb)
             self.add_widget(b)
@@ -160,7 +162,7 @@ class BrainHUD(Label):
 
     def set_visible(self, flag):
         self.visible = flag
-        self.height = 50 if flag else 0
+        self.height = 62 if flag else 0
         if not flag:
             self.text = ""
 
@@ -178,8 +180,12 @@ class BrainHUD(Label):
         held = " [держит предмет]" if viktim.held_object is not None else ""
         missing = [p for p in LIMB_PARTS if not viktim.limbs[p]]
         limb_note = f" | утрачено: {','.join(missing)} (remap={out['remap_count']})" if missing else ""
+        mem_note = (f" | LTM: {out['long_term_memories']} следов, "
+                    f"{out['consolidated_memories']} закреплено в коре")
+        if out.get("memories_replayed_tonight"):
+            mem_note += f", реигрывалось этой ночью: {out['memories_replayed_tonight']}"
         self.text = (
-            f"[{viktim.state}{held}]{limb_note} {day_time} · cpg={out['critical_period_gain']:.2f} "
+            f"[{viktim.state}{held}]{limb_note}{mem_note} {day_time} · cpg={out['critical_period_gain']:.2f} "
             f"· спайков={out['spikes_total']}\n{axes}"
         )
 
@@ -271,7 +277,7 @@ class AdobeBeckerApp(App):
         # иначе физический мир (координаты Viktim/объектов) не будет совпадать с окном
         w, h = size
         toolbars_h = 38 + 34 + 36 + 30  # высоты трёх верхних тулбаров + таймлайна
-        self.workspace.size = (w, max(200, h - toolbars_h - 50))
+        self.workspace.size = (w, max(200, h - toolbars_h - 64))
         self.workspace.pos = (0, 0)
 
     def _on_mouse_pos(self, window, pos):
@@ -388,26 +394,63 @@ class AdobeBeckerApp(App):
         except (OSError, json.JSONDecodeError):
             pass
 
+    # ---------------- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ: сохранение/загрузка мозга между сессиями ----------------
+    # Отдельно от "сцены" (рисунков/предметов) -- это буквально личность и весь
+    # накопленный опыт Viktim (веса синапсов, гормональные базовые уровни,
+    # гиппокампальные энграммы, возраст/критический период, утраченные
+    # конечности). Без этого перезапуск приложения стирал бы всё, чему он
+    # научился -- именно так реализована настоящая долговременная память.
+    def _brain_file_path(self, idx=0):
+        return os.path.join(self.user_data_dir, f"viktim_brain_{idx}.json")
+
+    def save_brain(self):
+        for i, v in enumerate(self.viktims):
+            try:
+                v.save_state(self._brain_file_path(i))
+            except OSError:
+                pass
+
+    def load_brain(self):
+        if not self.viktims:
+            return
+        path = self._brain_file_path(0)
+        if not os.path.exists(path):
+            return
+        try:
+            self.viktims[0].load_state(path)
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
     # ---------------- игровой цикл ----------------
     def tick(self, dt_s):
         dt_ms = dt_s * 1000.0
         w, h = self.workspace.size
 
+        # ВАЖНО: resolve_physics считает физику (и решает, что уничтожено), но
+        # мы намеренно НЕ убираем уничтоженные объекты из списка ДО того, как
+        # Viktim.update этот же кадр их "увидит" -- иначе объект, который только
+        # что причинил боль, уже исчезает из восприятия ДО формирования следа
+        # долговременной памяти, и энграмм кодируется с пустым сенсорным
+        # паттерном (не с чем ассоциировать боль). Убираем их уже ПОСЛЕ.
         removed = wp.resolve_physics(self.workspace.scene_objects, self.viktims, dt_ms, (w, h))
-        if removed:
-            removed_ids = {id(o) for o in removed}
-            self.workspace.scene_objects = [o for o in self.workspace.scene_objects
-                                             if id(o) not in removed_ids]
         self.workspace._full_redraw()
+
+        n_viktims = max(1, len(self.viktims))
+        steps = max(2, BRAIN_STEPS_PER_FRAME // n_viktims)
 
         last_out = None
         for v, tl in zip(self.viktims, self.timelines):
-            for _ in range(BRAIN_STEPS_PER_FRAME):
-                last_out = v.update(dt_ms / BRAIN_STEPS_PER_FRAME, self.workspace.scene_objects,
+            for _ in range(steps):
+                last_out = v.update(dt_ms / steps, self.workspace.scene_objects,
                                      cursor_pos=self._cursor_pos, canvas_size=(w, h))
             v.x = max(20, min(max(21, w - 20), v.x))
             v.y = max(60, min(max(61, h - 20), v.y))
             tl.maybe_capture(dt_ms, v)
+
+        if removed:
+            removed_ids = {id(o) for o in removed}
+            self.workspace.scene_objects = [o for o in self.workspace.scene_objects
+                                             if id(o) not in removed_ids]
 
         playhead_frame = None
         if self._scrub_fraction is not None:

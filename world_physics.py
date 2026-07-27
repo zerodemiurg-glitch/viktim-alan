@@ -20,6 +20,28 @@ def _dist(ax, ay, bx, by):
     return math.hypot(ax - bx, ay - by) + 1e-6
 
 
+def _closest_point_on_segment(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    len_sq = dx * dx + dy * dy
+    if len_sq < 1e-9:
+        return x1, y1, math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / len_sq))
+    cx, cy = x1 + t * dx, y1 + t * dy
+    return cx, cy, math.hypot(px - cx, py - cy)
+
+
+def _stroke_segments(kind, data):
+    """Возвращает список отрезков (x1,y1,x2,y2), из которых состоит нарисованный штрих."""
+    if kind == "line":
+        pts = data
+        return [(pts[i], pts[i + 1], pts[i + 2], pts[i + 3]) for i in range(0, len(pts) - 3, 2)]
+    if kind == "rect":
+        x1, y1, x2, y2 = data
+        xa, ya, xb, yb = min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+        return [(xa, ya, xb, ya), (xb, ya, xb, yb), (xb, yb, xa, yb), (xa, yb, xa, ya)]
+    return []
+
+
 def step_objects(objects, dt_ms, canvas_h):
     """Движение: гравитация для тяжёлых объектов, инерция для летящих снарядов."""
     dt_s = dt_ms / 1000.0
@@ -48,6 +70,12 @@ def resolve_physics(objects, viktims, dt_ms, canvas_size):
     for o in objects:
         if o.gravity and o.y < 10:
             to_remove.add(id(o))
+        # снаряды, улетевшие далеко за пределы видимой сцены -- убираем, чтобы
+        # не копились вечно невидимыми (наковальня/лассо и т.п. неподвижны, их не трогаем)
+        margin = 150
+        if (o.vx != 0 or o.vy != 0) and not o.gravity:
+            if o.x < -margin or o.x > w + margin or o.y < -margin or o.y > h + margin:
+                to_remove.add(id(o))
 
     for v in viktims:
         # держимый объект следует за телом (условная "рука")
@@ -116,3 +144,54 @@ def resolve_physics(objects, viktims, dt_ms, canvas_size):
         v._physical_relief = min(1.0, relief)
 
     return [o for o in objects if id(o) in to_remove]
+
+
+def apply_stroke_collisions(strokes, viktims, bump_pain=0.4):
+    """
+    Нарисованные пользователем (в роли Аниматора) линии/фигуры/кисть -- это
+    ЗАКОН МИРА ровно в той же степени, что и наковальня или лассо: реальный
+    физический барьер. Раньше Viktim проходил сквозь них незамеченным --
+    теперь тело физически выталкивается из линии при контакте, а сам факт
+    столкновения -- ощутимый "удар" (bump_pain), который его нервная система
+    заметит на следующем шаге (см. viktim._physical_pain), а не молчаливо
+    игнорируемое препятствие.
+
+    Вызывается ПОСЛЕ Viktim.update() (когда позиция уже сдвинулась) -- штрихи
+    не являются SceneObject и не участвуют в основном resolve_physics().
+    """
+    for v in viktims:
+        bumped = False
+        for item in strokes:
+            kind, data = item[0], item[1]
+
+            if kind == "circle":
+                cx, cy, r = data
+                dist_to_center = _dist(v.x, v.y, cx, cy)
+                d = abs(dist_to_center - r)
+                if d < v.body_radius:
+                    nx = (v.x - cx) / (dist_to_center + 1e-6)
+                    ny = (v.y - cy) / (dist_to_center + 1e-6)
+                    # выталкиваем на ближайшую сторону окружности (внутрь или наружу -- смотря откуда пришёл)
+                    target_r = r if dist_to_center >= r else r
+                    push = v.body_radius - d
+                    v.x += nx * push
+                    v.y += ny * push
+                    bumped = True
+                continue
+
+            for (x1, y1, x2, y2) in _stroke_segments(kind, data):
+                # дешёвая предварительная проверка по bounding-box перед точным расчётом
+                if (min(x1, x2) - v.body_radius > v.x or max(x1, x2) + v.body_radius < v.x or
+                        min(y1, y2) - v.body_radius > v.y or max(y1, y2) + v.body_radius < v.y):
+                    continue
+                px, py, d = _closest_point_on_segment(v.x, v.y, x1, y1, x2, y2)
+                if d < v.body_radius:
+                    nx, ny = v.x - px, v.y - py
+                    n_len = math.hypot(nx, ny) + 1e-6
+                    push = v.body_radius - d
+                    v.x += (nx / n_len) * push
+                    v.y += (ny / n_len) * push
+                    bumped = True
+
+        if bumped:
+            v._physical_pain = max(v._physical_pain, bump_pain)

@@ -443,6 +443,10 @@ class AdobeBeckerApp(App):
             for _ in range(steps):
                 last_out = v.update(dt_ms / steps, self.workspace.scene_objects,
                                      cursor_pos=self._cursor_pos, canvas_size=(w, h))
+                # нарисованные линии/фигуры -- физическая преграда (см. world_physics.py);
+                # проверяем каждый под-шаг, а не раз в кадр, иначе на высокой скорости
+                # тело может "проскочить" сквозь тонкую линию между кадрами
+                wp.apply_stroke_collisions(self.workspace.strokes, [v])
             v.x = max(20, min(max(21, w - 20), v.x))
             v.y = max(60, min(max(61, h - 20), v.y))
             tl.maybe_capture(dt_ms, v)

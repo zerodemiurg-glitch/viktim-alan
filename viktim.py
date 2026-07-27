@@ -69,14 +69,14 @@ class Viktim:
 
         self.head_r = 12
         self.torso = Bone(40, angle=-math.pi / 2)
-        self.arm_l_upper = Bone(20, angle=math.radians(20))
-        self.arm_l_lower = Bone(18, angle=math.radians(10))
-        self.arm_r_upper = Bone(20, angle=math.radians(-20))
-        self.arm_r_lower = Bone(18, angle=math.radians(-10))
-        self.leg_l_upper = Bone(22, angle=math.radians(10))
-        self.leg_l_lower = Bone(20, angle=math.radians(5))
-        self.leg_r_upper = Bone(22, angle=math.radians(-10))
-        self.leg_r_lower = Bone(20, angle=math.radians(-5))
+        self.arm_l_upper = Bone(20, angle=-math.pi / 2 + math.radians(20))
+        self.arm_l_lower = Bone(18, angle=-math.pi / 2 + math.radians(10))
+        self.arm_r_upper = Bone(20, angle=-math.pi / 2 - math.radians(20))
+        self.arm_r_lower = Bone(18, angle=-math.pi / 2 - math.radians(10))
+        self.leg_l_upper = Bone(22, angle=-math.pi / 2 + math.radians(10))
+        self.leg_l_lower = Bone(20, angle=-math.pi / 2 + math.radians(5))
+        self.leg_r_upper = Bone(22, angle=-math.pi / 2 - math.radians(10))
+        self.leg_r_lower = Bone(20, angle=-math.pi / 2 - math.radians(5))
 
         # --- физическое состояние тела (заполняется world_physics.py, не самим Viktim) ---
         self.held_object = None       # SceneObject | None -- что сейчас в "руке"
@@ -177,11 +177,29 @@ class Viktim:
                     position_signal[base + i] = tuning * max(0.0, 1.0 - dist / VISION_RANGE)
 
         looming = best_score * 0.35  # мягкая врождённая настороженность к быстро приближающимся телам
-        return looming, position_signal
+
+        # --- быстрый геометрический сигнал ориентации (аналог верхних холмиков
+        # четверохолмия -- подкорковый путь, который у реальных животных
+        # разворачивает тело к салиентному стимулу БЫСТРЕЕ и НАДЁЖНЕЕ, чем
+        # медленная кортикальная обработка). Без этого направление движения
+        # полностью зависело бы от сырого нейронного "turn", который у только
+        # что рождённой сети почти всегда околонулевой -- из-за чего сравнение
+        # turn>=0 стабильно резолвится в одну и ту же сторону, и Viktim
+        # двигался бы только в одном направлении независимо от обстановки.
+        steer_ref = best_obj if best_obj is not None else None
+        steer = 0.0
+        if steer_ref is not None:
+            dx = steer_ref.x - self.x
+            steer = max(-1.0, min(1.0, dx / 80.0))
+        elif cursor_pos is not None:
+            dx = cursor_pos[0] - self.x
+            steer = max(-1.0, min(1.0, dx / 80.0))
+
+        return looming, position_signal, steer
 
     # ---------- Шаг симуляции ----------
     def update(self, dt_ms, objects, cursor_pos=None, canvas_size=None):
-        looming, pos_signal = self.perceive(objects, cursor_pos)
+        looming, pos_signal, steer = self.perceive(objects, cursor_pos)
 
         # --- фантомная боль: мозг продолжает "приказывать" утраченной части тела
         # двигаться (эфферентная команда есть), но сенсорного подтверждения того,
@@ -255,8 +273,18 @@ class Viktim:
         # сглаживаем "куда поворачивать" экспоненциальным средним -- иначе шумные
         # спайки моторной коры дают рысканье лицом влево-вправо каждый кадр,
         # чего в оригинальной анимации никогда не было (Victim двигался чётко и уверенно)
+        # сглаживаем нейронный вклад экспоненциальным средним, но НЕ полагаемся
+        # на него одного -- у сети без достаточного обучения turn может быть
+        # околонулевым и давать одну и ту же сторону при сравнении >=0.
+        # Геометрический steer (см. perceive()) даёт надёжную реакцию на
+        # реальную обстановку с первого мгновения, а нейронный вклад постепенно
+        # добавляет нюанс/обучаемость поверх него.
         self._turn_ema = 0.85 * getattr(self, "_turn_ema", 0.0) + 0.15 * raw_turn
-        turn = self._turn_ema
+        turn = 0.5 * steer + 0.5 * self._turn_ema
+        if abs(steer) < 1e-6 and abs(self._turn_ema) < 1e-6:
+            # нет вообще никакого сигнала (пусто вокруг) -- не мотать монетку,
+            # а сохранить текущее направление взгляда
+            turn = 0.01 if self.facing >= 0 else -0.01
 
         nm = out["neuromodulators"]
         cortisol, dopamine = nm["cortisol"], nm["dopamine"]
@@ -319,8 +347,9 @@ class Viktim:
             breathing = math.sin(self._t * 0.003) * 0.05
             self.torso.angle = -math.radians(10) + breathing
             target_angles = {
-                "leg_l_upper": 0.0, "leg_r_upper": 0.0, "leg_l_lower": 0.0, "leg_r_lower": 0.0,
-                "arm_l_upper": 0.0, "arm_r_upper": 0.0,
+                "leg_l_upper": -math.pi / 2 + math.radians(5), "leg_r_upper": -math.pi / 2 - math.radians(5),
+                "leg_l_lower": -math.pi / 2 + math.radians(3), "leg_r_lower": -math.pi / 2 - math.radians(3),
+                "arm_l_upper": -math.pi / 2 + math.radians(8), "arm_r_upper": -math.pi / 2 - math.radians(8),
             }
             self._relax_towards(target_angles, dt_ms, rate=4.0)
             return
@@ -335,21 +364,23 @@ class Viktim:
             amplitude = min(0.9, 0.35 + speed_px_s / 220.0)  # чуть шире шаг на бегу, как в оригинале
             swing = math.sin(self._stride_phase) * amplitude
             lift = max(0.0, math.sin(self._stride_phase)) * 0.35  # лёгкое поджатие колена на взмахе
+            DOWN = -math.pi / 2
             target_angles = {
-                "leg_l_upper": math.radians(10) + swing,
-                "leg_r_upper": math.radians(-10) - swing,
-                "leg_l_lower": math.radians(5) + max(0, swing) * 0.6 + lift,
-                "leg_r_lower": math.radians(-5) - min(0, swing) * 0.6 - lift,
-                "arm_l_upper": math.radians(20) - swing * 0.8,   # руки качаются ПРОТИВОФАЗНО ногам
-                "arm_r_upper": math.radians(-20) + swing * 0.8,
+                "leg_l_upper": DOWN + math.radians(10) + swing,
+                "leg_r_upper": DOWN - math.radians(10) - swing,
+                "leg_l_lower": DOWN + math.radians(5) + max(0, swing) * 0.6 + lift,
+                "leg_r_lower": DOWN - math.radians(5) - min(0, swing) * 0.6 - lift,
+                "arm_l_upper": DOWN + math.radians(20) - swing * 0.8,   # руки качаются ПРОТИВОФАЗНО ногам
+                "arm_r_upper": DOWN - math.radians(20) + swing * 0.8,
             }
             self._relax_towards(target_angles, dt_ms, rate=14.0)  # быстро "догоняет" нужную фазу бега
         else:
             # стоит на месте -- плавно, а не рывком, возвращается в нейтральную стойку
+            DOWN = -math.pi / 2
             target_angles = {
-                "leg_l_upper": math.radians(10), "leg_r_upper": math.radians(-10),
-                "leg_l_lower": math.radians(5), "leg_r_lower": math.radians(-5),
-                "arm_l_upper": math.radians(20), "arm_r_upper": math.radians(-20),
+                "leg_l_upper": DOWN + math.radians(10), "leg_r_upper": DOWN - math.radians(10),
+                "leg_l_lower": DOWN + math.radians(5), "leg_r_lower": DOWN - math.radians(5),
+                "arm_l_upper": DOWN + math.radians(20), "arm_r_upper": DOWN - math.radians(20),
             }
             self._relax_towards(target_angles, dt_ms, rate=6.0)
 
@@ -372,9 +403,9 @@ class Viktim:
 
         segs = []
         neck_drop = self.torso.length * (0.4 if self.state == "sleep" else 1.0)
-        neck = (hip[0], hip[1] - neck_drop)
+        neck = (hip[0], hip[1] + neck_drop)  # ВВЕРХ от бёдер (Kivy: y растёт вверх, голова НЕ туда же, куда ноги)
         segs.append((hip[0], hip[1], neck[0], neck[1]))
-        head_center = (neck[0], neck[1] - self.head_r) if self.limbs["head"] else None
+        head_center = (neck[0], neck[1] + self.head_r) if self.limbs["head"] else None
 
         elbow_l = project(neck, self.arm_l_upper)
         hand_l = project(elbow_l, self.arm_l_lower)

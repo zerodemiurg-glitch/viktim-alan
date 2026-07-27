@@ -120,8 +120,66 @@ class Workspace(Widget):
                     continue
                 color = COLORS.get(obj.tag, (0.5, 0.5, 0.5, 1))
                 Color(*color)
-                r = obj.radius
-                Ellipse(pos=(obj.x - r, obj.y - r), size=(r * 2, r * 2))
+                self._draw_object_shape(obj.tag, obj.x, obj.y, obj.radius)
+
+    def _draw_object_shape(self, tag, x, y, r):
+        """
+        Различимый силуэт для каждого типа физического предмета -- раньше все
+        объекты рисовались одинаковым кружком, отличаясь только цветом, из-за
+        чего наковальня/пушка/меч выглядели неотличимой "точкой".
+        """
+        if tag == "anvil":
+            Line(points=[x - r, y - r * 0.4, x + r, y - r * 0.4, x + r * 0.55, y + r * 0.5,
+                         x - r * 0.55, y + r * 0.5, x - r, y - r * 0.4], width=2, close=True)
+        elif tag == "shuriken":
+            pts = []
+            for i in range(8):
+                rad = r if i % 2 == 0 else r * 0.35
+                ang = i * math.pi / 4
+                pts += [x + math.cos(ang) * rad, y + math.sin(ang) * rad]
+            Line(points=pts, width=2, close=True)
+        elif tag == "lasso":
+            Line(circle=(x, y, r * 0.8), width=2.5)
+            Line(points=[x + r * 0.6, y - r * 0.5, x + r * 1.3, y - r * 1.1], width=2.5)
+        elif tag == "plasma_gun":
+            Rectangle(pos=(x - r * 0.5, y - r * 0.3), size=(r * 0.9, r * 0.6))
+            Line(points=[x + r * 0.4, y, x + r * 1.5, y], width=4)
+        elif tag == "frame_cannon":
+            Rectangle(pos=(x - r * 0.6, y - r * 0.4), size=(r * 1.2, r * 0.8))
+            Line(rectangle=(x - r * 0.3, y - r * 0.15, r * 0.6, r * 0.3), width=1.5)
+        elif tag == "sword":
+            Line(points=[x, y - r * 1.1, x, y + r * 1.1], width=3)
+            Line(points=[x - r * 0.5, y - r * 0.25, x + r * 0.5, y - r * 0.25], width=3)
+        elif tag == "paintbrush":
+            Line(points=[x, y - r, x, y + r * 0.2], width=3)
+            Line(points=[x - r * 0.35, y + r * 0.2, x, y + r, x + r * 0.35, y + r * 0.2],
+                 width=2, close=True)
+        elif tag == "eraser":
+            Rectangle(pos=(x - r * 0.6, y - r * 0.35), size=(r * 1.2, r * 0.7))
+        elif tag == "pen":
+            Line(points=[x, y - r, x, y + r * 0.6], width=2.5)
+            Line(points=[x - r * 0.25, y + r * 0.6, x, y + r, x + r * 0.25, y + r * 0.6],
+                 width=2, close=True)
+        elif tag == "magnifying_glass":
+            Line(circle=(x - r * 0.15, y + r * 0.25, r * 0.55), width=2.5)
+            Line(points=[x + r * 0.25, y - r * 0.2, x + r * 1.0, y - r * 1.0], width=3)
+        elif tag == "timeline_frame":
+            Line(rectangle=(x - r * 0.6, y - r * 0.6, r * 1.2, r * 1.2), width=2)
+            Ellipse(pos=(x + r * 0.3, y + r * 0.3), size=(r * 0.25, r * 0.25))
+        elif tag == "toolbar_fragment":
+            Line(points=[x - r * 0.6, y - r * 0.3, x + r * 0.4, y - r * 0.5, x + r * 0.6, y + r * 0.2,
+                         x - r * 0.2, y + r * 0.5, x - r * 0.6, y - r * 0.3], width=2, close=True)
+        elif tag == "ice":
+            pts = []
+            for i in range(6):
+                ang = i * math.pi / 3
+                pts += [x + math.cos(ang) * r * 0.8, y + math.sin(ang) * r * 0.8]
+            Line(points=pts, width=2, close=True)
+        elif tag == "portal":
+            Line(circle=(x, y, r * 0.8), width=2.5)
+            Line(circle=(x, y, r * 0.4), width=1.5)
+        else:
+            Ellipse(pos=(x - r, y - r), size=(r * 2, r * 2))
 
     # ---------------- ввод ----------------
     def on_touch_down(self, touch):
